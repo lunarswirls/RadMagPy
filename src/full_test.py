@@ -38,7 +38,7 @@ def build_arguments():
     p.add_argument("--n_per_class", type=int, default=2000, help="Samples per material class.")
     p.add_argument("--fmin", type=float, default=0.05, help="Min frequency (GHz).")
     p.add_argument("--fmax", type=float, default=20.0, help="Max frequency (GHz).")
-    p.add_argument("--nf", type=int, default=100, help="Number of frequency samples.")
+    p.add_argument("--nf", type=int, default=1000, help="Number of frequency samples.")
     p.add_argument("--seed", type=int, default=7, help="Random seed.")
     p.add_argument("--oc_min", type=float, default=1e-6, help="OC floor for stable CPR.")
     p.add_argument("--cpr_cap", type=float, default=10.0, help="Visualization cap for CPR (<=0 disables capping).")
@@ -220,44 +220,46 @@ def main():
         n=("CPR_stable", "count"),
     )
 
-    # 1) Median CPR vs frequency by class
-    plt.figure()
-    for cls in g["class"].unique():
-        d = g[g["class"] == cls]
-        plt.plot(d["freq_Hz"]/1e9, d["CPR_med"], marker="o", label=cls)
-    plt.xlabel("Frequency (GHz)")
-    plt.ylabel("Median CPR (stable)")
-    plt.title(f"Median CPR vs Frequency by Material Class\n{args.roughness_model}")
-    plt.legend(fontsize="small", ncol=3, loc='upper center', bbox_to_anchor=(0.5, -0.2))
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, f"CPR_vs_freq_{str(args.roughness_model).lower().replace(' ', '_')}.png"), dpi=180)
+    # Combined 3-subplot figure for CPR, OC, SC vs frequency
+    fig, axes = plt.subplots(1, 3, figsize=(12, 6), sharex=True)
 
-    # 2) Median OC vs frequency
-    plt.figure()
-    for cls in g["class"].unique():
-        d = g[g["class"] == cls]
-        plt.plot(d["freq_Hz"]/1e9, d["OC_med"], marker="o", label=cls)
-    plt.xlabel("Frequency (GHz)")
-    plt.ylabel("Median OC")
-    plt.title(f"Median OC vs Frequency\n{args.roughness_model}")
-    plt.legend(fontsize="small", ncol=3, loc='upper center', bbox_to_anchor=(0.5, -0.2))
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, f"OC_vs_freq_{str(args.roughness_model).lower().replace(' ', '_')}.png"), dpi=180)
+    # Common x label
+    x = g["freq_Hz"].unique() / 1e9  # GHz
 
-    # 3) Median SC vs frequency
-    plt.figure()
     for cls in g["class"].unique():
         d = g[g["class"] == cls]
-        plt.plot(d["freq_Hz"]/1e9, d["SC_med"], marker="o", label=cls)
-    plt.xlabel("Frequency (GHz)")
-    plt.ylabel("Median SC")
-    plt.title(f"Median SC vs Frequency\n{args.roughness_model}")
-    plt.legend(fontsize="small", ncol=3, loc='upper center', bbox_to_anchor=(0.5, -0.2))
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, f"SC_vs_freq_{str(args.roughness_model).lower().replace(' ', '_')}.png"), dpi=180)
+        axes[0].plot(d["freq_Hz"] / 1e9, d["CPR_med"], marker="o", label=cls)
+        axes[1].plot(d["freq_Hz"] / 1e9, d["OC_med"], marker="o")
+        axes[2].plot(d["freq_Hz"] / 1e9, d["SC_med"], marker="o")
+
+    # Labels/titles
+    cpr_lab = "Median CPR"
+    if args.cpr_cap and args.cpr_cap > 0:
+        cpr_lab += f" (capped at {args.cpr_cap:g})"
+    axes[0].set_ylabel(cpr_lab)
+    axes[0].set_xlabel("Frequency (GHz)")
+    axes[0].set_title(f"Median CPR (stable) vs Frequency\n{args.roughness_model}")
+
+    axes[1].set_ylabel("Median OC")
+    axes[1].set_xlabel("Frequency (GHz)")
+    axes[1].set_title(f"Median OC vs Frequency\n{args.roughness_model}")
+
+    axes[2].set_ylabel("Median SC")
+    axes[2].set_xlabel("Frequency (GHz)")
+    axes[2].set_title(f"Median SC vs Frequency\n{args.roughness_model}")
+
+    # Grid styling
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+
+    # Shared legend, centered below all subplots
+    fig.legend(g["class"].unique(), fontsize="small", ncol=4,
+               loc="lower center", bbox_to_anchor=(0.5, -0.01))
+
+    plt.tight_layout(rect=[0, 0.05, 1, 1])  # leave space for legend
+    out_name = f"CPR_OC_SC_vs_freq_{str(args.roughness_model).lower().replace(' ', '_')}.png"
+    plt.savefig(os.path.join(args.outdir, out_name), dpi=180)
+    plt.close(fig)
 
     # 4) CPR heatmaps across (μ', ε') at ~0.85, 2.37, 7,14 GHz (use nearest frequencies)
     def median_cpr_grid(dfin, f_Hz, nbins=28):

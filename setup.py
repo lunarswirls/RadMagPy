@@ -13,4 +13,5 @@ setup(
     long_description_content_type="text/markdown",
     packages=find_packages(),
     python_requires=">=3.11, <4",
+    install_requires=['numpy', 'pandas', 'matplotlib']
 )

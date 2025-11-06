@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # Imports:
 import numpy as np
+import utilities as utils
 
 C0   = 299_792_458.0
 
@@ -20,25 +21,6 @@ def iem_shadowing(theta_rad, m=2.0):
     # Simple empirical shadowing -> S(θ) ~ exp(- (tanθ)^2 / m)
     tanth = np.tan(theta_rad)
     return np.exp(-(tanth**2)/max(m, 1e-6))
-
-
-def fresnel_Bpp_vv(eta1, eta2, n1, n2, cos_theta_i):
-    """
-    Composite Fresnel factor Bpp (vv, hh) for magnetic media (complex ε*, μ*)
-
-    :param eta1:
-    :param eta2:
-    :param n1:
-    :param n2:
-    :param cos_theta_i:
-    :return:
-    """
-    ct = snell_cos_theta_t(n1, n2, cos_theta_i)
-    rs = (eta2 * cos_theta_i - eta1 * ct) / (eta2 * cos_theta_i + eta1 * ct)
-    rp = (eta1 * cos_theta_i - eta2 * ct) / (eta1 * cos_theta_i + eta2 * ct)
-    # In IEM single-bounce, the co-pol weighting uses nominal Fresnel magnitude at the local angle.
-    # vv uses rp (E field in plane of incidence), hh uses rs.
-    return rp, rs
 
 
 def iem_single_bounce_OC_SC(theta_rad, freq_Hz, eps2, mu2,
@@ -81,7 +63,7 @@ def iem_single_bounce_OC_SC(theta_rad, freq_Hz, eps2, mu2,
     n2   = np.sqrt(mu2*eps2)
     ci   = np.cos(theta_rad)
 
-    rp, rs = fresnel_Bpp_vv(eta1, eta2, n1, n2, ci)  # rp~vv, rs~hh
+    rp, rs = utils.fresnel_coeffs_magnetic(eta1, eta2, n1, n2, ci)  # rp~vv, rs~hh
 
     # Core spectral factor
     spec = cal_kx * (k0**2) * (ci**2) * Wq

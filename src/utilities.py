@@ -16,10 +16,21 @@ def snell_cos_theta_t(n1, n2, cos_theta_i):
 
 
 def fresnel_coeffs_magnetic(eta1, eta2, n1, n2, cos_theta_i):
-    # Fresnel reflection with magnetic media
+    """
+    Composite Fresnel factor Bpp (vv, hh) for magnetic media (complex ε*, μ*)
+
+    :param eta1:
+    :param eta2:
+    :param n1:
+    :param n2:
+    :param cos_theta_i:
+    :return:
+    """
     ct = snell_cos_theta_t(n1, n2, cos_theta_i)
     rs = (eta2 * cos_theta_i - eta1 * ct) / (eta2 * cos_theta_i + eta1 * ct)
     rp = (eta1 * cos_theta_i - eta2 * ct) / (eta1 * cos_theta_i + eta2 * ct)
+    # In IEM single-bounce, the co-pol weighting uses nominal Fresnel magnitude at the local angle.
+    # vv uses rp (E field in plane of incidence), hh uses rs.
     return rs, rp
 
 
