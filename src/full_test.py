@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Planetary μ–ε Monte-Carlo -> OC/SC/CPR with frequency dependence
+# Imports:
+import argparse
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import materials
+import physics
+import roughness_models as rm
+import utilities as utils
+
+desc="""
+Monte-Carlo μ–ε tradeoffs in CPR/OC/SC with frequency dependence.
 
 Features
 - Material classes spanning planetary surfaces (basalt, anorthosite, regolith, ice, salts,
   metal-rich, ferrimagnetic soils).
-- Frequency sweep 0.3–12 GHz with simple dispersive proxies for ε*(f), μ*(f).
+- Frequency sweep with simple dispersive proxies for ε*(f), μ*(f).
 - Fresnel with magnetic media, RHCP incidence -> OC/SC coefficients -> CPR.
-- Pluggable roughness models: toy, facet, iem-lite, none
+- Pluggable roughness models: none (default), facet, simple, iem-lite, iem, hagfors
 - Stability filter for CPR (avoid OC≈0 blow-ups), optional capping for visualization.
 - CSV outputs (raw + cleaned) and several summary plots.
 
 Notes
-- This is a first-order facet model; no multiple scattering / dihedrals.
 - Dispersion terms are proxies; swap in lab-fit curves when available.
 
 Run
@@ -21,182 +31,10 @@ Run
 
 Author: Dany Waller
 """
-# Imports:
-import argparse
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 
-# ----------------------------- Utilities -----------------------------
-
-def complex_sqrt(z):
-    return np.sqrt(z + 0j)
-
-def snell_cos_theta_t(n1, n2, cos_theta_i):
-    # sin^2(theta_t) = (n1/n2)^2 * (1 - cos^2 theta_i)
-    sin2_t = (n1 / n2)**2 * (1.0 - cos_theta_i**2)
-    cos2_t = 1.0 - sin2_t
-    return complex_sqrt(cos2_t)
-
-def fresnel_coeffs_magnetic(eta1, eta2, n1, n2, cos_theta_i):
-    # Fresnel reflection with magnetic media
-    ct = snell_cos_theta_t(n1, n2, cos_theta_i)
-    rs = (eta2 * cos_theta_i - eta1 * ct) / (eta2 * cos_theta_i + eta1 * ct)
-    rp = (eta1 * cos_theta_i - eta2 * ct) / (eta1 * cos_theta_i + eta2 * ct)
-    return rs, rp
-
-def circular_components_from_rs_rp(rs, rp):
-    oc = 0.5 * (rs + rp)
-    sc = 0.5 * (rs - rp)
-    return np.abs(oc)**2, np.abs(sc)**2
-
-def nearest(arr, target):
-    arr = np.asarray(arr)
-    return arr[np.argmin(np.abs(arr - target))]
-
-# ----------------------------- Physics ------------------------------
-
-EPS0 = 8.854187817e-12
-MU0  = 4*np.pi*1e-7
-C0   = 299_792_458.0
-
-def eps_complex_dispersion(eps_real0, tan_e0, sigma, f, f0=1.0e9):
-    """
-    ε*(f) = ε' - i( tanδe(f)*ε' + σ/(ωε0) ), with tanδe ~ baseline * (1 + a*(f/f0)^b)
-    """
-    a, b = 0.5, 0.3
-    tan_e_f = tan_e0 * (1.0 + a * (f/f0)**b)
-    eps_im_sigma = sigma / (2*np.pi*f*EPS0)
-    return eps_real0 - 1j*(tan_e_f*eps_real0 + eps_im_sigma)
-
-def mu_complex_dispersion(mu_real0, tan_m0, f, f0=1.0e9, ferri=False, rng=None):
-    """
-    μ*(f) = μ' - i tanδm(f) μ', with tanδm ~ baseline * (1 + c*(f/f0)^d)
-    Optionally add a weak Lorentzian magnetic loss bump for ferrimagnetic soils.
-    """
-    c, d = 0.4, 0.2
-    tan_m_f = tan_m0 * (1.0 + c * (f/f0)**d)
-    mu_c = mu_real0 - 1j*tan_m_f*mu_real0
-    if ferri:
-        if rng is None:
-            rng = np.random.default_rng(0)
-        fr = 1.5e9 + 1.5e9 * rng.random(mu_real0.shape)  # 1.5–3.0 GHz
-        gamma = 0.6e9
-        # Lorentz term (very mild) – applied to μ'' only
-        lorentz = (gamma**2) / ((2*np.pi*(f - fr))**2 + gamma**2)
-        mu_c = (mu_c.real) - 1j*(mu_c.real * (tan_m_f + 0.02*lorentz))
-    return mu_c
-
-# -------------------------- Roughness models -------------------------
-
-def roughness_apply(OC, SC, model, *, theta_rad, rms_slope,
-                    freq_Hz, sigma_h_m, dihedral_k,
-                    rng, use_random_sigma_h=False, sigma_h_range=(0.003, 0.03)):
-    """
-    Returns (OCr, SCr) given chosen roughness model.
-
-    Models:
-      - 'none'   : return OC, SC as-is
-      - 'facet'  : no extra OC->SC transfer; facet slopes already sampled
-      - 'simple'    : k = 0.5 * rms_slope^2; transfer k*OC to SC
-      - 'iem-lite': F = exp(-(4π σh cosθ / λ)^2); transfer (1-F)*OC to SC + dihedral term
-    if model == "none" or model == "facet":
-        return OC, SC
-
-    if model == "simple":
-        k = 0.5 * np.square(rms_slope)
-        k = np.minimum(k, 0.8)
-        OCn = (1 - k) * OC
-        SCn = SC + k * OC
-        return OCn, SCn
-
-    if model == "iem-lite":
-        lam = C0 / freq_Hz
-        if use_random_sigma_h:
-            sigma_h = rng.uniform(sigma_h_range[0], sigma_h_range[1], size=OC.shape)
-        else:
-            sigma_h = sigma_h_m
-
-        # Smooth-surface power reduction (scalar), classic exp(-(4πσh cosθ / λ)^2)
-        red = np.exp(-np.square(4*np.pi*sigma_h*np.cos(theta_rad)/lam))
-        # Transfer a fraction (1 - red) of OC into SC (single-bounce depolarization)
-        trans = np.clip(1.0 - red, 0.0, 0.95)
-        OC1 = (1 - trans) * OC
-        SC1 = SC + trans * OC
-
-        # Add a simple dihedral boost scaling with sin^2(theta)
-        SC2 = SC1 + dihedral_k * np.square(np.sin(theta_rad)) * OC1
-        OC2 = OC1 * (1 - 0.25*dihedral_k)  # tiny energy bookkeeping
-        return OC2, SC2
-
-    raise ValueError(f"Unknown roughness model: {model}")
-
-# ----------------------------- Materials -----------------------------
-
-MATERIAL_CLASSES = {
-    "Basaltic rock": {
-        "eps_real": (6.0, 9.0),
-        "tan_e": (5e-3, 5e-2),
-        "sigma": (0.0, 1e-3),
-        "mu_real": (0.98, 1.08),
-        "tan_m": (1e-4, 5e-3),
-        "ferrimag": False,
-    },
-    "Anorthositic rock": {
-        "eps_real": (3.0, 5.0),
-        "tan_e": (2e-3, 2e-2),
-        "sigma": (0.0, 5e-4),
-        "mu_real": (0.98, 1.05),
-        "tan_m": (1e-4, 2e-3),
-        "ferrimag": False,
-    },
-    "Porous regolith/soil": {
-        "eps_real": (1.6, 3.5),
-        "tan_e": (1e-3, 1e-2),
-        "sigma": (0.0, 2e-4),
-        "mu_real": (0.98, 1.10),
-        "tan_m": (5e-5, 2e-3),
-        "ferrimag": False,
-    },
-    "Water ice (clean/cold)": {
-        "eps_real": (3.05, 3.25),
-        "tan_e": (3e-4, 2e-3),
-        "sigma": (0.0, 1e-6),
-        "mu_real": (0.995, 1.01),
-        "tan_m": (5e-5, 5e-4),
-        "ferrimag": False,
-    },
-    "Salts/evaporites": {
-        "eps_real": (4.5, 7.5),
-        "tan_e": (1e-3, 5e-2),
-        "sigma": (0.0, 2e-3),
-        "mu_real": (0.98, 1.05),
-        "tan_m": (1e-4, 2e-3),
-        "ferrimag": False,
-    },
-    "Metal-rich regolith": {
-        "eps_real": (5.0, 12.0),
-        "tan_e": (5e-3, 5e-2),
-        "sigma": (1e-3, 5e-2),
-        "mu_real": (0.98, 1.20),
-        "tan_m": (5e-4, 1e-2),
-        "ferrimag": False,
-    },
-    "Ferrimagnetic soil": {
-        "eps_real": (4.0, 9.0),
-        "tan_e": (2e-3, 3e-2),
-        "sigma": (0.0, 5e-3),
-        "mu_real": (1.05, 1.50),
-        "tan_m": (1e-3, 2e-2),
-        "ferrimag": True, #  (Fe-oxide/npFe)
-    },
-}
-
-# ----------------------------- CLI & Main ----------------------------
 
 def build_arguments():
-    p = argparse.ArgumentParser(description="Monte-Carlo μ–ε tradeoffs in CPR/OC/SC with frequency dependence.")
+    p = argparse.ArgumentParser(description=desc)
     p.add_argument("--n_per_class", type=int, default=2000, help="Samples per material class.")
     p.add_argument("--fmin", type=float, default=0.05, help="Min frequency (GHz).")
     p.add_argument("--fmax", type=float, default=20.0, help="Max frequency (GHz).")
@@ -209,8 +47,10 @@ def build_arguments():
 
     # Roughness control
     p.add_argument("--roughness-model", type=str, default="none",
-                   choices=["simple", "facet", "iem-lite", "none"],
+                   choices=["simple", "facet", "iem-lite", "iem", "hagfors", "none"],
                    help="Roughness/depole model.")
+
+    # IEM-lite options
     p.add_argument("--sigma-h-m", type=float, default=0.01,
                    help="IEM-lite RMS height σh in meters (used if not randomized).")
     p.add_argument("--dihedral-k", type=float, default=0.15,
@@ -219,6 +59,27 @@ def build_arguments():
                    help="Randomize σh per sample in IEM-lite.")
     p.add_argument("--sigma-h-range", type=float, nargs=2, default=[0.003, 0.03],
                    help="Range for randomized σh (meters) in IEM-lite.")
+
+    # IEM options
+    p.add_argument("--iem-psd", type=str, default="gaussian",
+                   choices=["gaussian", "exponential"],
+                   help="Surface PSD shape for IEM.")
+    p.add_argument("--iem-shadowing", action="store_true",
+                   help="Enable empirical shadowing factor in IEM.")
+    p.add_argument("--iem-shadow-m", type=float, default=2.0,
+                   help="Shadowing steepness parameter m (larger => stronger shadowing).")
+    p.add_argument("--iem-cal-kx", type=float, default=1.0,
+                   help="Calibration scalar for IEM spectral term.")
+
+    # Hagfors options
+    p.add_argument("--hag-C", type=float, default=0.3,
+                   help="Hagfors shape parameter C (controls angular roll-off).")
+    p.add_argument("--hag-n", type=float, default=3.0,
+                   help="Hagfors exponent n on cos(theta).")
+    p.add_argument("--hag-rho0", type=float, default=0.2,
+                   help="Hagfors amplitude scaling rho0.")
+    p.add_argument("--hag-pol-mix", type=float, default=0.08,
+                   help="Fraction of Hagfors power routed to SC (0..1).")
     return p.parse_args()
 
 
@@ -250,7 +111,7 @@ def main():
     records = []
 
     # --- Sample and simulate ---
-    for cls_name, par in MATERIAL_CLASSES.items():
+    for cls_name, par in materials.MATERIAL_CLASSES.items():
         # Draw base params
         eps_r0 = rng.uniform(*par["eps_real"], size=args.n_per_class)
         tan_e0 = 10**rng.uniform(np.log10(par["tan_e"][0]),
@@ -268,17 +129,17 @@ def main():
 
         for f in freqs:
             # Dispersive ε*(f) and μ*(f)
-            eps2 = eps_complex_dispersion(eps_r0, tan_e0, sigma0, f)
-            mu2  = mu_complex_dispersion(mu_r0, tan_m0, f, ferri=par["ferrimag"], rng=rng)
+            eps2 = physics.eps_complex_dispersion(eps_r0, tan_e0, sigma0, f)
+            mu2  = physics.mu_complex_dispersion(mu_r0, tan_m0, f, ferri=par["ferrimag"], rng=rng)
 
             eta2 = np.sqrt(mu2/eps2)
             n2   = np.sqrt(mu2*eps2)
 
-            rs, rp = fresnel_coeffs_magnetic(eta1, eta2, n1, n2, cos_theta)
-            OC, SC = circular_components_from_rs_rp(rs, rp)
+            rs, rp = utils.fresnel_coeffs_magnetic(eta1, eta2, n1, n2, cos_theta)
+            OC, SC = utils.circular_components_from_rs_rp(rs, rp)
 
             # --- Apply chosen roughness model (frequency-aware if needed) ---
-            OCr, SCr = roughness_apply(
+            OCr, SCr = rm.roughness_apply(
                 OC, SC, args.roughness_model,
                 theta_rad=theta_rad,
                 rms_slope=rms_slope,
@@ -288,6 +149,13 @@ def main():
                 rng=rng,
                 use_random_sigma_h=args.use_random_sigma_h,
                 sigma_h_range=tuple(args.sigma_h_range),
+                eps2=eps2, mu2=mu2,
+                corr_L=0.03,  # meters; adjust or expose as CLI
+                iem_psd=args.iem_psd,
+                iem_shadow=args.iem_shadowing,
+                iem_shadow_m=args.iem_shadow_m,
+                iem_cal_kx=args.iem_cal_kx,
+                hag_C=args.hag_C, hag_n=args.hag_n, hag_rho0=args.hag_rho0, hag_pol_mix=args.hag_pol_mix
             )
 
             CPR = np.divide(SCr, OCr, out=np.full_like(SCr, np.nan), where=OCr > 1e-18)
@@ -322,6 +190,10 @@ def main():
         args.roughness_model = 'Facet-only Roughness Model'
     elif args.roughness_model == 'iem-lite':
         args.roughness_model = 'IEM-Lite Roughness Model'
+    elif args.roughness_model == 'iem':
+        args.roughness_model = 'IEM'
+    elif args.roughness_model == 'hagfors':
+        args.roughness_model = 'Hagfors Roughness Model'
 
     # Save raw
     raw_csv = os.path.join(args.outdir, f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_RAW.csv")
@@ -412,7 +284,7 @@ def main():
 
     unique_freqs = np.sort(df["freq_Hz"].unique())
     for fGHz in [0.85, 2.37, 7.14]:
-        f_sel = nearest(unique_freqs, fGHz*1e9)
+        f_sel = utils.nearest(unique_freqs, fGHz*1e9)
         mu_cent, eps_cent, grid = median_cpr_grid(df, f_sel, nbins=28)
         if grid is None:
             continue
@@ -431,7 +303,7 @@ def main():
         plt.savefig(os.path.join(args.outdir, f"CPR_heatmap_{str(args.roughness_model).lower().replace(' ', '_')}_{f_sel/1e9:.2f}GHz.png"), dpi=180)
 
     # 5) S-band scatter CPR vs μ' (marker size ~ ε')
-    s_freq = nearest(unique_freqs, 2.38e9)
+    s_freq = utils.nearest(unique_freqs, 2.38e9)
     sband = df[np.isclose(df["freq_Hz"], s_freq)].copy()
     plt.figure()
     ms = 6 + 3*(sband["eps2_real"] - sband["eps2_real"].min()) / \

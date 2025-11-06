@@ -1,1 +1,6 @@
 /.idea
+*.pyc
+radmagpy.egg-info/top_level.txt
+radmagpy.egg-info/SOURCES.txt
+radmagpy.egg-info/PKG-INFO
+radmagpy.egg-info/dependency_links.txt
