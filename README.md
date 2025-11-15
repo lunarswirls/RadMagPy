@@ -1,7 +1,7 @@
 # Radar and Magnetism (RadMag) Python Package
 
 ## Description
-These are useful tools for radar theory modeling and analysis. A full test script with tunable parameters is included.
+These are useful tools for modeling coupled radar and magnetic sounding theory. A full test script with tunable parameters is included.
 
 
 ## Installation
