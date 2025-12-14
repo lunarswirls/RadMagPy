@@ -5,11 +5,11 @@ import argparse
 import os
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import materials
 import physics
 import roughness_models as rm
 import utilities as utils
+import plot_util as plotutil
 
 desc="""
 Monte-Carlo μ–ε tradeoffs in CPR/OC/SC with frequency dependence.
@@ -20,11 +20,11 @@ Features
 - Frequency sweep with simple dispersive proxies for ε*(f), μ*(f).
 - Fresnel with magnetic media, RHCP incidence -> OC/SC coefficients -> CPR.
 - Pluggable roughness models: none (default), facet, simple, iem-lite, iem, hagfors
-- Stability filter for CPR (avoid OC≈0 blow-ups), optional capping for visualization.
-- CSV outputs (raw + cleaned) and several summary plots.
+- Stability filter for CPR (avoid OC≈0 blow-ups) plus capping for visualization.
+- CSV outputs (raw + cleaned) and summary plots.
 
 Notes
-- Dispersion terms are proxies; swap in lab-fit curves when available.
+- Dispersion terms are proxies, how to get lab-fit curves?
 
 Run
     python full_test.py --outdir results
@@ -37,17 +37,18 @@ def build_arguments():
     p = argparse.ArgumentParser(description=desc)
     p.add_argument("--n_per_class", type=int, default=2000, help="Samples per material class.")
     p.add_argument("--fmin", type=float, default=0.05, help="Min frequency (GHz).")
-    p.add_argument("--fmax", type=float, default=20.0, help="Max frequency (GHz).")
-    p.add_argument("--nf", type=int, default=1000, help="Number of frequency samples.")
+    p.add_argument("--fmax", type=float, default=10.0, help="Max frequency (GHz).")
+    p.add_argument("--nf", type=int, default=750, help="Number of frequency samples.")
     p.add_argument("--seed", type=int, default=7, help="Random seed.")
     p.add_argument("--oc_min", type=float, default=1e-6, help="OC floor for stable CPR.")
-    p.add_argument("--cpr_cap", type=float, default=10.0, help="Visualization cap for CPR (<=0 disables capping).")
+    p.add_argument("--cpr_cap", type=float, default=100.0, help="Visualization cap for CPR (<=0 disables capping).")
     p.add_argument("--outdir", type=str, default=".", help="Output directory for CSVs and plots.")
+    p.add_argument("--save_raw", action="store_true", help="Writes raw data CSV before filtering for stable CPR.")
     p.add_argument("--no_plots", action="store_true", help="Skip plotting (still writes CSVs).")
 
-    # Roughness control
+    # Roughness/depol model
     p.add_argument("--roughness-model", type=str, default="none",
-                   choices=["simple", "facet", "iem-lite", "iem", "hagfors", "none"],
+                   choices=["simple", "facet", "iem", "none"],
                    help="Roughness/depole model.")
 
     # IEM-lite options
@@ -62,7 +63,7 @@ def build_arguments():
 
     # IEM options
     p.add_argument("--iem-psd", type=str, default="gaussian",
-                   choices=["gaussian", "exponential"],
+                   choices=["gaussian", "exponential", "fractal"],
                    help="Surface PSD shape for IEM.")
     p.add_argument("--iem-shadowing", action="store_true",
                    help="Enable empirical shadowing factor in IEM.")
@@ -70,6 +71,12 @@ def build_arguments():
                    help="Shadowing steepness parameter m (larger => stronger shadowing).")
     p.add_argument("--iem-cal-kx", type=float, default=1.0,
                    help="Calibration scalar for IEM spectral term.")
+    p.add_argument("--fractal_H", type=float, default=0.7,
+                   help="Hurst exponent controlling scale dependence of fractal roughness (D = 3 − H).")
+    p.add_argument("--fractal_L_outer", type=float, default=None,
+                   help="Outer (largest) roughness scale in meters; sets minimum spatial frequency (q_min).")
+    p.add_argument("--fractal_L_inner", type=float, default=0.01,
+                   help="Inner (smallest) roughness scale in meters; sets high-frequency roll-off (q_max).")
 
     # Hagfors options
     p.add_argument("--hag-C", type=float, default=0.3,
@@ -85,7 +92,14 @@ def build_arguments():
 
 def main():
     args = build_arguments()
-    os.makedirs(args.outdir, exist_ok=True)
+
+    if args.roughness_model is not "none":
+        outdir = args.outdir
+        full_outdir = os.path.join(outdir, args.roughness_model)
+    else:
+        full_outdir = args.outdir
+
+    os.makedirs(full_outdir, exist_ok=True)
 
     rng = np.random.default_rng(args.seed)
 
@@ -155,6 +169,7 @@ def main():
                 iem_shadow=args.iem_shadowing,
                 iem_shadow_m=args.iem_shadow_m,
                 iem_cal_kx=args.iem_cal_kx,
+                fractal_H=args.fractal_H, fractal_L_outer=args.fractal_L_outer, fractal_L_inner=args.fractal_L_inner,
                 hag_C=args.hag_C, hag_n=args.hag_n, hag_rho0=args.hag_rho0, hag_pol_mix=args.hag_pol_mix
             )
 
@@ -195,10 +210,11 @@ def main():
     elif args.roughness_model == 'hagfors':
         args.roughness_model = 'Hagfors Roughness Model'
 
-    # Save raw
-    raw_csv = os.path.join(args.outdir, f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_RAW.csv")
-    df.to_csv(raw_csv, index=False)
-    print(f"Wrote raw samples: {raw_csv}  (rows={len(df):,})")
+    if args.save_raw:
+        # Save raw
+        raw_csv = os.path.join(args.outdir, f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_RAW.csv")
+        df.to_csv(raw_csv, index=False)
+        print(f"Wrote raw samples: {raw_csv}  (rows={len(df):,})")
 
     # Stable CPR (avoid OC→0 blow-ups)
     df["CPR_stable"] = np.where(df["OC"] >= args.oc_min, df["CPR"], np.nan)
@@ -212,113 +228,38 @@ def main():
     if args.no_plots:
         return
 
-    # ----------- Plots -----------
-    g = df.groupby(["class", "freq_Hz"], as_index=False).agg(
-        CPR_med=("CPR_stable", "median"),
-        OC_med=("OC", "median"),
-        SC_med=("SC", "median"),
-        n=("CPR_stable", "count"),
+    png1 = plotutil.make_freq_summary_figure(
+        df,
+        outdir=args.outdir,
+        roughness_model=args.roughness_model,
+        cpr_cap=args.cpr_cap,
+        ci=0.95,
+        ci_method="bootstrap",  # or "percentile"
+        n_boot=800,
+        rng_seed=args.seed,
+        show_ci=True,
+        legend_ncol=4,
     )
+    print("Saved:", png1)
 
-    # Combined 3-subplot figure for CPR, OC, SC vs frequency
-    fig, axes = plt.subplots(1, 3, figsize=(12, 6), sharex=True)
+    png2 = plotutil.make_cpr_heatmaps(
+        df,
+        outdir=args.outdir,
+        roughness_model=args.roughness_model,
+        target_freqs_GHz=(0.85, 2.37, 7.14),
+        nbins=28,
+        cpr_cap=args.cpr_cap,
+    )
+    print("Saved:", png2)
 
-    # Common x label
-    x = g["freq_Hz"].unique() / 1e9  # GHz
+    png3 = plotutil.make_cpr_vs_mu_scatter(
+        df,
+        outdir=args.outdir,
+        roughness_model=args.roughness_model,
+        target_freq_GHz=2.38,
+    )
+    print("Saved:", png3)
 
-    for cls in g["class"].unique():
-        d = g[g["class"] == cls]
-        axes[0].plot(d["freq_Hz"] / 1e9, d["CPR_med"], marker="o", label=cls)
-        axes[1].plot(d["freq_Hz"] / 1e9, d["OC_med"], marker="o")
-        axes[2].plot(d["freq_Hz"] / 1e9, d["SC_med"], marker="o")
-
-    # Labels/titles
-    cpr_lab = "Median CPR"
-    if args.cpr_cap and args.cpr_cap > 0:
-        cpr_lab += f" (capped at {args.cpr_cap:g})"
-    axes[0].set_ylabel(cpr_lab)
-    axes[0].set_xlabel("Frequency (GHz)")
-    axes[0].set_title(f"Median CPR (stable) vs Frequency\n{args.roughness_model}")
-
-    axes[1].set_ylabel("Median OC")
-    axes[1].set_xlabel("Frequency (GHz)")
-    axes[1].set_title(f"Median OC vs Frequency\n{args.roughness_model}")
-
-    axes[2].set_ylabel("Median SC")
-    axes[2].set_xlabel("Frequency (GHz)")
-    axes[2].set_title(f"Median SC vs Frequency\n{args.roughness_model}")
-
-    # Grid styling
-    for ax in axes:
-        ax.grid(True, alpha=0.3)
-
-    # Shared legend, centered below all subplots
-    fig.legend(g["class"].unique(), fontsize="small", ncol=4,
-               loc="lower center", bbox_to_anchor=(0.5, -0.01))
-
-    plt.tight_layout(rect=[0, 0.05, 1, 1])  # leave space for legend
-    out_name = f"CPR_OC_SC_vs_freq_{str(args.roughness_model).lower().replace(' ', '_')}.png"
-    plt.savefig(os.path.join(args.outdir, out_name), dpi=180)
-    plt.close(fig)
-
-    # 4) CPR heatmaps across (μ', ε') at ~0.85, 2.37, 7,14 GHz (use nearest frequencies)
-    def median_cpr_grid(dfin, f_Hz, nbins=28):
-        sub = dfin[np.isclose(dfin["freq_Hz"], f_Hz)]
-        if sub.empty:
-            return None, None, None
-        mu = sub["mu2_real"].to_numpy()
-        epsr = sub["eps2_real"].to_numpy()
-        cpr = sub["CPR_stable"].to_numpy()
-        if len(mu) == 0 or np.all(np.isnan(cpr)):
-            return None, None, None
-        mu_edges = np.linspace(np.nanmin(mu), np.nanmax(mu), nbins+1)
-        eps_edges = np.linspace(np.nanmin(epsr), np.nanmax(epsr), nbins+1)
-        grid = np.full((nbins, nbins), np.nan)
-        for i in range(nbins):
-            for j in range(nbins):
-                m = (mu >= mu_edges[i]) & (mu < mu_edges[i+1]) & \
-                    (epsr >= eps_edges[j]) & (epsr < eps_edges[j+1])
-                if np.any(m):
-                    grid[i, j] = np.nanmedian(cpr[m])
-        mu_cent = 0.5*(mu_edges[:-1] + mu_edges[1:])
-        eps_cent = 0.5*(eps_edges[:-1] + eps_edges[1:])
-        return mu_cent, eps_cent, grid
-
-    unique_freqs = np.sort(df["freq_Hz"].unique())
-    for fGHz in [0.85, 2.37, 7.14]:
-        f_sel = utils.nearest(unique_freqs, fGHz*1e9)
-        mu_cent, eps_cent, grid = median_cpr_grid(df, f_sel, nbins=28)
-        if grid is None:
-            continue
-        plt.figure()
-        extent = [eps_cent.min(), eps_cent.max(), mu_cent.min(), mu_cent.max()]
-        plt.imshow(np.flipud(grid), aspect="auto", extent=extent, origin="lower")
-        plt.xlabel("ε' (real permittivity)")
-        plt.ylabel("μ' (real permeability)")
-        plt.title(f"Median CPR (stable) across (μ', ε') at ~{f_sel/1e9:.2f} GHz\n{args.roughness_model}")
-        cbar = plt.colorbar()
-        lab = "Median CPR"
-        if args.cpr_cap and args.cpr_cap > 0:
-            lab += f" (capped at {args.cpr_cap:g})"
-        cbar.set_label(lab)
-        plt.tight_layout()
-        plt.savefig(os.path.join(args.outdir, f"CPR_heatmap_{str(args.roughness_model).lower().replace(' ', '_')}_{f_sel/1e9:.2f}GHz.png"), dpi=180)
-
-    # 5) S-band scatter CPR vs μ' (marker size ~ ε')
-    s_freq = utils.nearest(unique_freqs, 2.38e9)
-    sband = df[np.isclose(df["freq_Hz"], s_freq)].copy()
-    plt.figure()
-    ms = 6 + 3*(sband["eps2_real"] - sband["eps2_real"].min()) / \
-            (sband["eps2_real"].max() - sband["eps2_real"].min() + 1e-12)
-    plt.scatter(sband["mu2_real"], sband["CPR_stable"], s=ms, alpha=0.25)
-    plt.xlabel("μ' (~S-band)")
-    plt.ylabel("CPR (stable)")
-    plt.title(f"CPR vs μ' at ~{s_freq/1e9:.2f} GHz\n{args.roughness_model} (marker size ~ ε')")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, f"CPR_vs_mu_Sband_{str(args.roughness_model).lower().replace(' ', '_')}.png"), dpi=180)
-
-    print(f"Plots saved to: {os.path.abspath(args.outdir)}")
 
 if __name__ == "__main__":
     main()

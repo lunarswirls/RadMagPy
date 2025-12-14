@@ -17,6 +17,72 @@ def psd_exponential(q, sigma_h, L):
     return (2.0 * sigma_h**2 * L**2) / np.power(1.0 + (q*L)**2, 1.5)
 
 
+def psd_fractal_powerlaw(q, sigma_h_ref, L_ref, H=0.7, L_outer=None, L_inner=0.01):
+    """
+    Self-affine (fractal) isotropic 2-D PSD, band-limited power law:
+
+        W(q) = A * q^{-beta},   beta = 2H + 2
+
+    where H is the Hurst exponent (0 < H < 1). The corresponding fractal dimension
+    for a 2-D surface embedded in 3-D is:
+
+        D = 3 - H
+
+    We band-limit the PSD between:
+        qmin = 2π / L_outer   (largest scale)
+        qmax = 2π / L_inner   (smallest scale)
+
+    and normalize A so that the integrated variance matches sigma_h_ref^2 at the
+    reference "profile length" / outer scale L_ref (approximate, pragmatic).
+
+    For an isotropic 2-D PSD:
+        sigma^2 = ∫ W(q) 2π q dq   over [qmin, qmax]
+
+    Notes:
+      - This is a practical engineering model; for strict scale-dependent rms height,
+        sigma_h_ref should be interpreted as the rms height associated with the chosen
+        band [L_outer, L_inner].
+      - Choose L_inner ~ mm–cm to represent the smallest roughness scale that contributes
+        at S/X band; choose L_outer ~ decimeters–meters depending on geology.
+    """
+    q = np.asarray(q, dtype=float)
+
+    # Defaults
+    if L_outer is None:
+        L_outer = L_ref
+    L_outer = max(float(L_outer), 1e-6)
+    L_inner = max(float(L_inner), 1e-6)
+
+    qmin = 2.0 * np.pi / L_outer
+    qmax = 2.0 * np.pi / L_inner
+
+    # Hurst -> spectral exponent
+    H = float(H)
+    beta = 2.0 * H + 2.0  # for 2-D self-affine surfaces
+
+    # Band-limit mask
+    W = np.zeros_like(q)
+    m = (q >= qmin) & (q <= qmax)
+
+    # Normalize A such that sigma^2 = ∫ W(q) 2π q dq matches sigma_h_ref^2
+    # sigma^2 = 2π A ∫_{qmin}^{qmax} q^{1-beta} dq
+    #        = 2π A [ (q^{2-beta})/(2-beta) ]_{qmin}^{qmax}
+    sigma2 = float(sigma_h_ref)**2
+    if sigma2 <= 0:
+        return W
+
+    denom = (qmax**(2.0 - beta) - qmin**(2.0 - beta))
+    if np.isclose(denom, 0.0) or np.isclose(2.0 - beta, 0.0):
+        # extremely unlikely unless H ~ 0
+        A = 0.0
+    else:
+        A = sigma2 * (2.0 - beta) / (2.0 * np.pi * denom)
+
+    W[m] = A * np.power(q[m], -beta)
+    return W
+
+
+
 def iem_shadowing(theta_rad, m=2.0):
     # Simple empirical shadowing -> S(θ) ~ exp(- (tanθ)^2 / m)
     tanth = np.tan(theta_rad)
@@ -25,7 +91,8 @@ def iem_shadowing(theta_rad, m=2.0):
 
 def iem_single_bounce_OC_SC(theta_rad, freq_Hz, eps2, mu2,
                             sigma_h, L, psd_kind="gaussian",
-                            shadow=False, shadow_m=2.0, cal_kx=1.0):
+                            shadow=False, shadow_m=2.0, cal_kx=1.0,
+                            fractal_H=0.7, fractal_L_outer=None, fractal_L_inner=0.01):
     """
     Returns (OC, SC) power fractions from an IEM single-bounce term,
     computed in *linear* basis first (hh/vv), then mapped to *circular* OC/SC.
@@ -50,8 +117,17 @@ def iem_single_bounce_OC_SC(theta_rad, freq_Hz, eps2, mu2,
         Wq = psd_gaussian(q, sigma_h, L)
     elif psd_kind == "exponential":
         Wq = psd_exponential(q, sigma_h, L)
+    elif psd_kind == "fractal":
+        Wq = psd_fractal_powerlaw(
+            q,
+            sigma_h_ref=sigma_h,
+            L_ref=L,
+            H=fractal_H,
+            L_outer=fractal_L_outer,
+            L_inner=fractal_L_inner
+        )
     else:
-        raise ValueError("psd_kind must be 'gaussian' or 'exponential'")
+        raise ValueError("psd_kind must be 'gaussian', 'exponential', or 'fractal'")
 
     # Medium 1 (vacuum)
     eps1 = 1.0 + 0j
@@ -117,7 +193,8 @@ def roughness_apply(OC, SC, model, *, theta_rad, rms_slope,
                     rng, use_random_sigma_h=False, sigma_h_range=(0.003, 0.03),
                     eps2 = None, mu2 = None, corr_L = 0.03,
                     iem_psd = "gaussian", iem_shadow = False, iem_shadow_m = 2.0, iem_cal_kx = 1.0,
-                    hag_C = 0.3, hag_n = 3.0, hag_rho0 = 0.2, hag_pol_mix = 0.08):
+                    fractal_H=0.7, fractal_L_outer=None, fractal_L_inner=0.01,
+                    hag_C=0.3, hag_n=3.0, hag_rho0=0.2, hag_pol_mix=0.08):
     """
     Returns (OCr, SCr) given chosen roughness model.
 
@@ -160,15 +237,16 @@ def roughness_apply(OC, SC, model, *, theta_rad, rms_slope,
 
     # --- Full IEM single-bounce ---
     if model == "iem":
-        lam = C0 / freq_Hz
         sigma_h = (rng.uniform(sigma_h_range[0], sigma_h_range[1], size=OC.shape)
                    if use_random_sigma_h else sigma_h_m)
-        # correlation length; keep user-editable; you may also randomize
         L = corr_L
+
         OC_iem, SC_iem = iem_single_bounce_OC_SC(
             theta_rad, freq_Hz, eps2=eps2, mu2=mu2,
             sigma_h=sigma_h, L=L,
-            psd_kind=iem_psd, shadow=iem_shadow, shadow_m=iem_shadow_m, cal_kx=iem_cal_kx
+            psd_kind=iem_psd,
+            shadow=iem_shadow, shadow_m=iem_shadow_m, cal_kx=iem_cal_kx,
+            fractal_H=fractal_H, fractal_L_outer=fractal_L_outer, fractal_L_inner=fractal_L_inner
         )
         return OC_iem, SC_iem
 

@@ -5,7 +5,7 @@ setup(
     name="radmagpy",
     # Version scheme is last date updated in YYYY.MM.DDv format
     # where 'v' may increment [a...z] for multiple releases on the same day
-    version="2025.11.06a",
+    version="2025.12.14a",
     description="Radar and Magnetism (RadMag) Python Package",
     author="Dany Waller",
     author_email="dany.c.waller@gmail.com",
