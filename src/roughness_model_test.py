@@ -27,7 +27,7 @@ Notes
 - Dispersion terms are proxies, how to get lab-fit curves?
 
 Run
-    python full_test.py --outdir results
+    python roughness_model_test.py --outdir results
 
 Author: Dany Waller
 """
@@ -45,6 +45,13 @@ def build_arguments():
     p.add_argument("--outdir", type=str, default=".", help="Output directory for CSVs and plots.")
     p.add_argument("--save_raw", action="store_true", help="Writes raw data CSV before filtering for stable CPR.")
     p.add_argument("--no_plots", action="store_true", help="Skip plotting (still writes CSVs).")
+
+    # Magnetic toggle
+    p.add_argument(
+        "--use-mu0",
+        action="store_true",
+        help="Force μ=μ0 (μr=1, tanδm=0, ferrimag disabled) for all materials at runtime.",
+    )
 
     # Roughness/depol model
     p.add_argument("--roughness-model", type=str, default="none",
@@ -90,10 +97,46 @@ def build_arguments():
     return p.parse_args()
 
 
+def resolve_mu_sampling_and_dispersion(
+    *,
+    use_mu0: bool,
+    rng: np.random.Generator,
+    par: dict,
+    n: int,
+):
+    """
+    Central switch for magnetic behavior.
+
+    If use_mu0=True:
+      - μr is forced to 1
+      - tanδm is forced to 0
+      - ferrimag is disabled
+    Otherwise:
+      - sample μr and tanδm from the material class ranges
+      - ferrimag is taken from the material class flag
+    """
+    if use_mu0:
+        mu_r0 = np.ones(n, dtype=float)
+        tan_m0 = np.zeros(n, dtype=float)
+        ferri = False
+        return mu_r0, tan_m0, ferri
+
+    mu_r0 = rng.uniform(*par["mu_real"], size=n)
+
+    # Avoid log10(0) if a class ever supplies 0
+    tanm_lo = max(par["tan_m"][0], 1e-30)
+    tanm_hi = max(par["tan_m"][1], tanm_lo)
+    tan_m0 = 10 ** rng.uniform(np.log10(tanm_lo), np.log10(tanm_hi), size=n)
+
+    ferri = bool(par.get("ferrimag", False))
+    return mu_r0, tan_m0, ferri
+
+
 def main():
     args = build_arguments()
 
-    if args.roughness_model is not "none":
+    # Correct string comparison (Python uses !=, not "is not")
+    if args.roughness_model != "none":
         outdir = args.outdir
         full_outdir = os.path.join(outdir, args.roughness_model)
     else:
@@ -104,7 +147,7 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     # Frequencies
-    freqs = np.linspace(args.fmin*1e9, args.fmax*1e9, args.nf)
+    freqs = np.linspace(args.fmin * 1e9, args.fmax * 1e9, args.nf)
 
     # Angle & roughness distributions (shared per class)
     theta_deg = np.clip(rng.normal(35.0, 12.0, size=args.n_per_class), 0.0, 80.0)
@@ -119,8 +162,8 @@ def main():
     # Medium 1 (vacuum, relative units)
     eps1 = 1.0 + 0j
     mu1  = 1.0 + 0j
-    eta1 = np.sqrt(mu1/eps1)
-    n1   = np.sqrt(mu1*eps1)
+    eta1 = np.sqrt(mu1 / eps1)
+    n1   = np.sqrt(mu1 * eps1)
 
     records = []
 
@@ -128,26 +171,37 @@ def main():
     for cls_name, par in materials.MATERIAL_CLASSES.items():
         # Draw base params
         eps_r0 = rng.uniform(*par["eps_real"], size=args.n_per_class)
-        tan_e0 = 10**rng.uniform(np.log10(par["tan_e"][0]),
-                                 np.log10(par["tan_e"][1]),
-                                 size=args.n_per_class)
+        tan_e0 = 10 ** rng.uniform(
+            np.log10(par["tan_e"][0]),
+            np.log10(par["tan_e"][1]),
+            size=args.n_per_class
+        )
+
         # Avoid log10(0)
-        sigma_lo = max(par["sigma"][0], 1e-9)
-        sigma0 = 10**rng.uniform(np.log10(sigma_lo),
-                                 np.log10(par["sigma"][1]),
-                                 size=args.n_per_class)
-        mu_r0  = rng.uniform(*par["mu_real"], size=args.n_per_class)
-        tan_m0 = 10**rng.uniform(np.log10(par["tan_m"][0]),
-                                 np.log10(par["tan_m"][1]),
-                                 size=args.n_per_class)
+        sigma_lo = max(par["sigma"][0], 1e-30)
+        sigma_hi = max(par["sigma"][1], sigma_lo)
+        sigma0 = 10 ** rng.uniform(np.log10(sigma_lo), np.log10(sigma_hi), size=args.n_per_class)
+
+        # --- Magnetic toggle: decide how to sample μ and whether ferrimag is allowed ---
+        mu_r0, tan_m0, ferri = resolve_mu_sampling_and_dispersion(
+            use_mu0=args.use_mu0,
+            rng=rng,
+            par=par,
+            n=args.n_per_class,
+        )
 
         for f in freqs:
             # Dispersive ε*(f) and μ*(f)
             eps2 = physics.eps_complex_dispersion(eps_r0, tan_e0, sigma0, f)
-            mu2  = physics.mu_complex_dispersion(mu_r0, tan_m0, f, ferri=par["ferrimag"], rng=rng)
 
-            eta2 = np.sqrt(mu2/eps2)
-            n2   = np.sqrt(mu2*eps2)
+            if args.use_mu0:
+                # Force μr=1 exactly, independent of f
+                mu2 = (1.0 + 0j) * np.ones_like(eps2, dtype=np.complex128)
+            else:
+                mu2 = physics.mu_complex_dispersion(mu_r0, tan_m0, f, ferri=ferri, rng=rng)
+
+            eta2 = np.sqrt(mu2 / eps2)
+            n2   = np.sqrt(mu2 * eps2)
 
             rs, rp = utils.fresnel_coeffs_magnetic(eta1, eta2, n1, n2, cos_theta)
             OC, SC = utils.circular_components_from_rs_rp(rs, rp)
@@ -163,14 +217,19 @@ def main():
                 rng=rng,
                 use_random_sigma_h=args.use_random_sigma_h,
                 sigma_h_range=tuple(args.sigma_h_range),
-                eps2=eps2, mu2=mu2,
+                eps2=eps2, mu2=mu2,  # keep passing mu2; it will be unity when use_mu0=True
                 corr_L=0.03,  # meters; adjust or expose as CLI
                 iem_psd=args.iem_psd,
                 iem_shadow=args.iem_shadowing,
                 iem_shadow_m=args.iem_shadow_m,
                 iem_cal_kx=args.iem_cal_kx,
-                fractal_H=args.fractal_H, fractal_L_outer=args.fractal_L_outer, fractal_L_inner=args.fractal_L_inner,
-                hag_C=args.hag_C, hag_n=args.hag_n, hag_rho0=args.hag_rho0, hag_pol_mix=args.hag_pol_mix
+                fractal_H=args.fractal_H,
+                fractal_L_outer=args.fractal_L_outer,
+                fractal_L_inner=args.fractal_L_inner,
+                hag_C=args.hag_C,
+                hag_n=args.hag_n,
+                hag_rho0=args.hag_rho0,
+                hag_pol_mix=args.hag_pol_mix
             )
 
             CPR = np.divide(SCr, OCr, out=np.full_like(SCr, np.nan), where=OCr > 1e-18)
@@ -183,8 +242,8 @@ def main():
                 "eps_real0": eps_r0,
                 "tan_delta_e0": tan_e0,
                 "sigma_Spm": sigma0,
-                "mu_real0": mu_r0,
-                "tan_delta_m0": tan_m0,
+                "mu_real0": mu_r0,      # will be 1.0 if --use-mu0
+                "tan_delta_m0": tan_m0, # will be 0.0 if --use-mu0
                 "eps2_real": np.real(eps2),
                 "eps2_imag": -np.imag(eps2),
                 "mu2_real": np.real(mu2),
@@ -197,22 +256,27 @@ def main():
 
     df = pd.concat(records, ignore_index=True)
 
-    if args.roughness_model == 'none':
-        args.roughness_model = 'No Roughness Model'
-    elif args.roughness_model == 'simple':
-        args.roughness_model = 'Simple Roughness Model'
-    elif args.roughness_model == 'facet':
-        args.roughness_model = 'Facet-only Roughness Model'
-    elif args.roughness_model == 'iem-lite':
-        args.roughness_model = 'IEM-Lite Roughness Model'
-    elif args.roughness_model == 'iem':
-        args.roughness_model = 'IEM'
-    elif args.roughness_model == 'hagfors':
-        args.roughness_model = 'Hagfors Roughness Model'
+    if args.roughness_model == "none":
+        args.roughness_model = "No Roughness Model"
+    elif args.roughness_model == "simple":
+        args.roughness_model = "Simple Roughness Model"
+    elif args.roughness_model == "facet":
+        args.roughness_model = "Facet-only Roughness Model"
+    elif args.roughness_model == "iem-lite":
+        args.roughness_model = "IEM-Lite Roughness Model"
+    elif args.roughness_model == "iem":
+        args.roughness_model = "IEM"
+    elif args.roughness_model == "hagfors":
+        args.roughness_model = "Hagfors Roughness Model"
+
+    # Optionally label output with mu0 toggle
+    mu_tag = "mu0" if args.use_mu0 else "muvar"
 
     if args.save_raw:
-        # Save raw
-        raw_csv = os.path.join(args.outdir, f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_RAW.csv")
+        raw_csv = os.path.join(
+            args.outdir,
+            f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_{mu_tag}_RAW.csv"
+        )
         df.to_csv(raw_csv, index=False)
         print(f"Wrote raw samples: {raw_csv}  (rows={len(df):,})")
 
@@ -221,7 +285,10 @@ def main():
     if args.cpr_cap and args.cpr_cap > 0:
         df["CPR_stable"] = np.where(df["CPR_stable"] <= args.cpr_cap, df["CPR_stable"], args.cpr_cap)
 
-    clean_csv = os.path.join(args.outdir, f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_CLEAN.csv")
+    clean_csv = os.path.join(
+        args.outdir,
+        f"planetary_mu_epsilon_cpr_{str(args.roughness_model).lower().replace(' ', '_')}_{mu_tag}_CLEAN.csv"
+    )
     df.to_csv(clean_csv, index=False)
     print(f"Wrote cleaned samples: {clean_csv}")
 
@@ -234,7 +301,7 @@ def main():
         roughness_model=args.roughness_model,
         cpr_cap=args.cpr_cap,
         ci=0.95,
-        ci_method="bootstrap",  # or "percentile"
+        ci_method="bootstrap",
         n_boot=800,
         rng_seed=args.seed,
         show_ci=True,

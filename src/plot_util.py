@@ -344,7 +344,7 @@ def make_cpr_vs_mu_scatter(
     eps_col: str = "eps2_real",
     cpr_col: str = "CPR_stable",
     alpha: float = 0.25,
-    base_marker_size: float = 6.0,
+    base_marker_size: float = 4.0,
     size_scale: float = 3.0,
     figsize: tuple[float, float] = (6.5, 5.5),
     dpi: int = 180,

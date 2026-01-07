@@ -82,7 +82,6 @@ def psd_fractal_powerlaw(q, sigma_h_ref, L_ref, H=0.7, L_outer=None, L_inner=0.0
     return W
 
 
-
 def iem_shadowing(theta_rad, m=2.0):
     # Simple empirical shadowing -> S(θ) ~ exp(- (tanθ)^2 / m)
     tanth = np.tan(theta_rad)
@@ -156,16 +155,17 @@ def iem_single_bounce_OC_SC(theta_rad, freq_Hz, eps2, mu2,
     slope2 = (k0 * sigma_h * np.sin(theta_rad))**2
     sigma_hv = 0.15 * slope2 * np.sqrt(sigma_vv * sigma_hh)
 
-    # Map linear (hh, vv, hv) -> circular (OC, SC)
-    # For monostatic, random azimuth assumption: OC ~ (σ_hh + σ_vv + 2 Re σ_hv_corr)/2
-    # SC ~ (σ_hh + σ_vv - 2 Re σ_hv_corr)/2
-    # We approximate <Re σ_hv_corr> ~ 0, and allocate cross-pol symmetrically.
-    total_lin = sigma_hh + sigma_vv
-    OC = 0.5 * (total_lin + 2*sigma_hv)
-    SC = 0.5 * (total_lin - 2*sigma_hv)
-    # Ensure non-negative
-    OC = np.maximum(OC, 0.0)
-    SC = np.maximum(SC, 0.0)
+    total = sigma_hh + sigma_vv + 2.0 * sigma_hv
+
+    # Depolarized fraction driven by hv power
+    sc_frac = sigma_hv / np.maximum(total, 1e-30)
+
+    # Keep SC fraction reasonable (tune upper bound)
+    sc_frac = np.clip(sc_frac, 0.0, 0.5)
+
+    SC = sc_frac * total
+    OC = (1.0 - sc_frac) * total
+
     return OC, SC
 
 
