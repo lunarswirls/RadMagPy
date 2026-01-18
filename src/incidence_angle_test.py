@@ -21,10 +21,12 @@ Core equations:
   OC = |E_OC|^2, SC = |E_SC|^2, CPR = SC/OC
   k = ω sqrt(μ* ε*), α = Im(k), δ = 1/α
 
-Outputs:
+Outputs (per material):
   - summary CSV per case with median curves vs θi
-  - PNG with 4×1 panels: OC, SC, log10(CPR), skin depth (log scale)
-  - optional compare μ-var vs μ0 overlay on the same plot
+  - PNG with 4×1 panels: OC, SC, log10(CPR), normal penetration depth (log scale)
+
+New:
+  - If --material all, runs over all materials in the chosen material dict.
 
 Usage examples
 --------------
@@ -34,15 +36,19 @@ List materials:
 Single run (material ranges, no μ forcing):
   python fresnel_mu_sweep_material.py --material "Basaltic rock" --freq_GHz 2.38 --outdir out
 
-Compare μ-var vs μ0 (same dielectric draws, μ forced in μ0 case):
-  python fresnel_mu_sweep_material.py --material "Ferrimagnetic soil" --compare-mu0 --freq_GHz 2.38 --outdir out
+Run all materials:
+  python fresnel_mu_sweep_material.py --material all --freq_GHz 2.38 --outdir out
+
+Compare μ-var vs μ0 (same dielectric draws, μ forced in μ0 case) for all materials:
+  python fresnel_mu_sweep_material.py --material all --compare-mu0 --freq_GHz 2.38 --outdir out
 
 Enable ferrimagnetic dispersion (only affects materials with ferrimag=True):
   python fresnel_mu_sweep_material.py --material "Ferrimagnetic soil" --freq_GHz 2.38 --ferri-model debye --outdir out
 
-Author: Dany Waller (script generated)
+Author: Dany Waller (script generated + extended)
 """
 import argparse
+import re
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -58,6 +64,17 @@ import materials
 EPS0 = 8.8541878128e-12  # F/m
 MU0  = 4.0e-7 * np.pi     # H/m
 C0   = 299_792_458.0      # m/s
+
+
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def safe_name(name: str) -> str:
+    """
+    Sanitise a material name for use in filenames:
+    keep letters, digits, underscore, dash, dot; replace everything else with "_".
+    """
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name))
 
 
 # ---------------------------------------------------------------------
@@ -407,7 +424,6 @@ def run_sweep(
     OC = np.empty((ntheta, n_samp), dtype=float)
     SC = np.empty_like(OC)
     log10CPR = np.empty_like(OC)
-    skin = np.empty_like(OC)
 
     theta_i_rad = np.deg2rad(theta_i_deg)
     cos_i = np.cos(theta_i_rad)
@@ -455,9 +471,20 @@ def run_sweep(
 # CLI
 # ---------------------------------------------------------------------
 def build_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Material-based Fresnel OC/SC/log10(CPR) sweep with optional ferrimag μ dispersion.")
+    p = argparse.ArgumentParser(
+        description=(
+            "Material-based Fresnel OC/SC/log10(CPR) sweep vs incidence angle θi "
+            "with optional ferrimagnetic μ dispersion. "
+            "Use --material <name> for a single material or --material all for all materials."
+        )
+    )
     p.add_argument("--list-materials", action="store_true", help="List available material keys and exit.")
-    p.add_argument("--material", type=str, default="Basaltic rock", help="Material name (exact key).")
+    p.add_argument(
+        "--material",
+        type=str,
+        default="Basaltic rock",
+        help="Material name (exact key) or 'all' to run all materials.",
+    )
 
     p.add_argument("--freq_GHz", type=float, default=2.38, help="Frequency [GHz].")
     p.add_argument("--n_samp", type=int, default=2000, help="Monte-Carlo samples from material ranges.")
@@ -507,105 +534,117 @@ def main() -> None:
             print(" -", k)
         return
 
-    if args.material not in mats:
-        choices = "\n".join([f"  - {k}" for k in sorted(mats.keys())])
-        raise SystemExit(f"Unknown material '{args.material}'. Available:\n{choices}")
+    # Determine which materials to run
+    if args.material.lower() == "all":
+        material_list = sorted(mats.keys())
+    else:
+        if args.material not in mats:
+            choices = "\n".join([f"  - {k}" for k in sorted(mats.keys())])
+            raise SystemExit(f"Unknown material '{args.material}'. Available:\n{choices}")
+        material_list = [args.material]
 
-    par = mats[args.material]
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     freq_Hz = float(args.freq_GHz) * 1e9
     theta_i_deg = np.linspace(float(args.theta_i_min), float(args.theta_i_max), int(args.ntheta))
 
-    # Cases
-    cases = []
+    # Cases (same for all materials)
     if args.compare_mu0:
         cases = [("muvar", False), ("mu0", True)]
     else:
         force_mu0 = bool(args.use_mu0 or args.use_mu0_class_dict)
         cases = [("mu0" if force_mu0 else "muvar", force_mu0)]
 
-    # Run each case and summarize
-    summaries = {"OC": {}, "SC": {}, "log10CPR": {}, "delta_bulk": {}, "delta_normal": {}}
+    for material_name in material_list:
+        par = mats[material_name]
+        mat_safe = safe_name(material_name)
 
-    for case_name, force_mu0 in cases:
-        draws, arrays = run_sweep(
-            material_name=args.material,
-            par=par,
-            freq_Hz=freq_Hz,
-            theta_i_deg=theta_i_deg,
-            n_samp=int(args.n_samp),
-            seed=int(args.seed),
-            force_mu0=force_mu0,
-            floor=float(args.floor),
-            ferri_model=str(args.ferri_model),
-            mu_r_inf=float(args.mu_r_inf),
-            tau_s=float(args.tau_s),
-            loss_scale=float(args.ferri_loss_scale),
-        )
+        print(f"=== Running material: {material_name} ===")
 
-        # Save draws (one row per sample)
-        draws2 = draws.copy()
-        draws2.insert(0, "material", args.material)
-        draws2.insert(1, "case", case_name)
-        draws2.insert(2, "freq_GHz", float(args.freq_GHz))
-        draws_csv = outdir / f"draws_{args.material.replace(' ', '_')}_{case_name}_f{args.freq_GHz:g}GHz.csv"
-        draws2.to_csv(draws_csv, index=False)
+        # Fresh summaries per material (for plotting)
+        summaries = {"OC": {}, "SC": {}, "log10CPR": {}, "delta_bulk": {}, "delta_normal": {}}
 
-        # Summaries vs θi
-        for k in summaries.keys():
-            summaries[k][case_name] = summarize_vs_theta(
+        for case_name, force_mu0 in cases:
+            draws, arrays = run_sweep(
+                material_name=material_name,
+                par=par,
+                freq_Hz=freq_Hz,
                 theta_i_deg=theta_i_deg,
-                arr2d=arrays[k],
-                ci=float(args.ci),
-                n_boot=int(args.n_boot),
+                n_samp=int(args.n_samp),
                 seed=int(args.seed),
+                force_mu0=force_mu0,
+                floor=float(args.floor),
+                ferri_model=str(args.ferri_model),
+                mu_r_inf=float(args.mu_r_inf),
+                tau_s=float(args.tau_s),
+                loss_scale=float(args.ferri_loss_scale),
             )
 
-        # Save summary CSV (median + CI)
-        sum_df = pd.DataFrame({
-            "theta_i_deg": theta_i_deg,
+            # Save draws (one row per sample)
+            draws2 = draws.copy()
+            draws2.insert(0, "material", material_name)
+            draws2.insert(1, "case", case_name)
+            draws2.insert(2, "freq_GHz", float(args.freq_GHz))
 
-            "OC_median": summaries["OC"][case_name]["median"],
-            "OC_ci_lo": summaries["OC"][case_name]["ci_lo"],
-            "OC_ci_hi": summaries["OC"][case_name]["ci_hi"],
+            draws_csv = outdir / f"draws_{mat_safe}_{case_name}_f{args.freq_GHz:g}GHz.csv"
+            draws2.to_csv(draws_csv, index=False)
 
-            "SC_median": summaries["SC"][case_name]["median"],
-            "SC_ci_lo": summaries["SC"][case_name]["ci_lo"],
-            "SC_ci_hi": summaries["SC"][case_name]["ci_hi"],
+            # Summaries vs θi
+            for k in summaries.keys():
+                summaries[k][case_name] = summarize_vs_theta(
+                    theta_i_deg=theta_i_deg,
+                    arr2d=arrays[k],
+                    ci=float(args.ci),
+                    n_boot=int(args.n_boot),
+                    seed=int(args.seed),
+                )
 
-            "log10CPR_median": summaries["log10CPR"][case_name]["median"],
-            "log10CPR_ci_lo": summaries["log10CPR"][case_name]["ci_lo"],
-            "log10CPR_ci_hi": summaries["log10CPR"][case_name]["ci_hi"],
+            # Save summary CSV (median + CI) for this material+case
+            sum_df = pd.DataFrame({
+                "theta_i_deg": theta_i_deg,
 
-            # NEW: both penetration metrics
-            "delta_bulk_median_m": summaries["delta_bulk"][case_name]["median"],
-            "delta_bulk_ci_lo_m": summaries["delta_bulk"][case_name]["ci_lo"],
-            "delta_bulk_ci_hi_m": summaries["delta_bulk"][case_name]["ci_hi"],
+                "OC_median": summaries["OC"][case_name]["median"],
+                "OC_ci_lo": summaries["OC"][case_name]["ci_lo"],
+                "OC_ci_hi": summaries["OC"][case_name]["ci_hi"],
 
-            "delta_normal_median_m": summaries["delta_normal"][case_name]["median"],
-            "delta_normal_ci_lo_m": summaries["delta_normal"][case_name]["ci_lo"],
-            "delta_normal_ci_hi_m": summaries["delta_normal"][case_name]["ci_hi"],
-        })
+                "SC_median": summaries["SC"][case_name]["median"],
+                "SC_ci_lo": summaries["SC"][case_name]["ci_lo"],
+                "SC_ci_hi": summaries["SC"][case_name]["ci_hi"],
 
-        sum_df.insert(0, "material", args.material)
-        sum_df.insert(1, "case", case_name)
-        sum_df.insert(2, "freq_GHz", float(args.freq_GHz))
-        sum_df.insert(3, "ferri_model", str(args.ferri_model))
-        sum_csv = outdir / f"sweep_summary_{args.material.replace(' ', '_')}_{case_name}_f{args.freq_GHz:g}GHz.csv"
-        sum_df.to_csv(sum_csv, index=False)
+                "log10CPR_median": summaries["log10CPR"][case_name]["median"],
+                "log10CPR_ci_lo": summaries["log10CPR"][case_name]["ci_lo"],
+                "log10CPR_ci_hi": summaries["log10CPR"][case_name]["ci_hi"],
 
-        print("Saved:", draws_csv)
-        print("Saved:", sum_csv)
+                "delta_bulk_median_m": summaries["delta_bulk"][case_name]["median"],
+                "delta_bulk_ci_lo_m": summaries["delta_bulk"][case_name]["ci_lo"],
+                "delta_bulk_ci_hi_m": summaries["delta_bulk"][case_name]["ci_hi"],
 
-    # Plot
-    tag = f"_{args.tag}" if args.tag else ""
-    ferri_tag = f"_ferri-{args.ferri_model}" if args.ferri_model != "none" else ""
-    out_png = outdir / f"OC_SC_log10CPR_skin_vs_theta_{args.material.replace(' ', '_')}_f{args.freq_GHz:g}GHz{ferri_tag}{tag}.png"
-    title = f"{args.material} | f={args.freq_GHz:g} GHz | n_samp={args.n_samp} | ferri={args.ferri_model}"
-    plot_4panel(theta_i_deg, summaries, out_png, title)
-    print("Saved:", out_png)
+                "delta_normal_median_m": summaries["delta_normal"][case_name]["median"],
+                "delta_normal_ci_lo_m": summaries["delta_normal"][case_name]["ci_lo"],
+                "delta_normal_ci_hi_m": summaries["delta_normal"][case_name]["ci_hi"],
+            })
+
+            sum_df.insert(0, "material", material_name)
+            sum_df.insert(1, "case", case_name)
+            sum_df.insert(2, "freq_GHz", float(args.freq_GHz))
+            sum_df.insert(3, "ferri_model", str(args.ferri_model))
+
+            sum_csv = outdir / f"sweep_summary_{mat_safe}_{case_name}_f{args.freq_GHz:g}GHz.csv"
+            sum_df.to_csv(sum_csv, index=False)
+
+            print("Saved:", draws_csv)
+            print("Saved:", sum_csv)
+
+        # Plot per material
+        tag = f"_{args.tag}" if args.tag else ""
+        ferri_tag = f"_ferri-{args.ferri_model}" if args.ferri_model != "none" else ""
+        out_png = outdir / f"OC_SC_log10CPR_skin_vs_theta_{mat_safe}_f{args.freq_GHz:g}GHz{ferri_tag}{tag}.png"
+        title = f"{material_name} | f={args.freq_GHz:g} GHz | n_samp={args.n_samp} | ferri={args.ferri_model}"
+        plot_4panel(theta_i_deg, summaries, out_png, title)
+        print("Saved:", out_png)
+
+    print("Done.")
 
 
 if __name__ == "__main__":

@@ -25,22 +25,6 @@ MATERIAL_CLASSES = {
         "tan_m": (5e-5, 2e-3),
         "ferrimag": False,
     },
-    "Water ice (clean/cold)": {
-        "eps_real": (3.05, 3.25),
-        "tan_e": (3e-4, 2e-3),
-        "sigma": (0.0, 1e-6),
-        "mu_real": (0.995, 1.01),
-        "tan_m": (5e-5, 5e-4),
-        "ferrimag": False,
-    },
-    "Salts/evaporites": {
-        "eps_real": (4.5, 7.5),
-        "tan_e": (1e-3, 5e-2),
-        "sigma": (0.0, 2e-3),
-        "mu_real": (0.98, 1.05),
-        "tan_m": (1e-4, 2e-3),
-        "ferrimag": False,
-    },
     "Metal-rich regolith": {
         "eps_real": (5.0, 12.0),
         "tan_e": (5e-3, 5e-2),
@@ -84,22 +68,6 @@ MATERIAL_CLASSES_MU0 = {
         "tan_m": (0.0, 0.0),
         "ferrimag": False,
     },
-    "Water ice (clean/cold)": {
-        "eps_real": (3.05, 3.25),
-        "tan_e": (3e-4, 2e-3),
-        "sigma": (0.0, 1e-6),
-        "mu_real": (1.0, 1.0),
-        "tan_m": (0.0, 0.0),
-        "ferrimag": False,
-    },
-    "Salts/evaporites": {
-        "eps_real": (4.5, 7.5),
-        "tan_e": (1e-3, 5e-2),
-        "sigma": (0.0, 2e-3),
-        "mu_real": (1.0, 1.0),
-        "tan_m": (0.0, 0.0),
-        "ferrimag": False,
-    },
     "Metal-rich regolith": {
         "eps_real": (5.0, 12.0),
         "tan_e": (5e-3, 5e-2),
@@ -119,3 +87,39 @@ MATERIAL_CLASSES_MU0 = {
         "ferrimag": False,
     },
 }
+
+"""
+    "Water ice (clean/cold)": {
+        "eps_real": (3.05, 3.25),
+        "tan_e": (3e-4, 2e-3),
+        "sigma": (0.0, 1e-6),
+        "mu_real": (0.995, 1.01),
+        "tan_m": (5e-5, 5e-4),
+        "ferrimag": False,
+    },
+    "Salts/evaporites": {
+        "eps_real": (4.5, 7.5),
+        "tan_e": (1e-3, 5e-2),
+        "sigma": (0.0, 2e-3),
+        "mu_real": (0.98, 1.05),
+        "tan_m": (1e-4, 2e-3),
+        "ferrimag": False,
+    },
+    
+    "Water ice (clean/cold)": {
+        "eps_real": (3.05, 3.25),
+        "tan_e": (3e-4, 2e-3),
+        "sigma": (0.0, 1e-6),
+        "mu_real": (1.0, 1.0),
+        "tan_m": (0.0, 0.0),
+        "ferrimag": False,
+    },
+    "Salts/evaporites": {
+        "eps_real": (4.5, 7.5),
+        "tan_e": (1e-3, 5e-2),
+        "sigma": (0.0, 2e-3),
+        "mu_real": (1.0, 1.0),
+        "tan_m": (0.0, 0.0),
+        "ferrimag": False,
+    },
+"""
